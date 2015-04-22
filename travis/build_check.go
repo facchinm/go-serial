@@ -6,8 +6,6 @@
 
 package test
 
-import "go.bug.st/serial"
-
 func BuildTest() {
 	serial.GetPortsList()
 	mode := &serial.Mode{

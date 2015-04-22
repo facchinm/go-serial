@@ -82,4 +82,4 @@ serial port:
 This library doesn't make use of cgo and "C" package, so it's a pure go library
 that can be easily cross compiled.
 */
-package serial // import "go.bug.st/serial"
+package serial
