@@ -68,3 +68,4 @@ func termiosMask(data int) uint32 {
 
 const ioctl_tcgetattr = syscall.TCGETS
 const ioctl_tcsetattr = syscall.TCSETS
+const ioctl_tiocmdtr = syscall.TIOCM_DTR

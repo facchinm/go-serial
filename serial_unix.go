@@ -40,6 +40,19 @@ func (port *SerialPort) Write(p []byte) (n int, err error) {
 	return syscall.Write(port.handle, p)
 }
 
+/*
+func (port *SerialPort) SetDTR(level bool) error {
+	var cmd uintptr
+	if level {
+		cmd = syscall.TIOCMBIS
+	} else {
+		cmd = syscall.TIOCMBIC
+	}
+
+	return ioctl(port.handle, ioctl_tiocmdtr, cmd)
+}
+*/
+
 // Set all parameters of the serial port. See the Mode structure for more
 // info.
 func (port *SerialPort) SetMode(mode *Mode) error {
