@@ -16,7 +16,10 @@ package serial
 
 */
 
-import "syscall"
+import (
+	"syscall"
+	"time"
+)
 
 // opaque type that implements SerialPort interface for Windows
 type SerialPort struct {
@@ -87,6 +90,24 @@ func (port *SerialPort) Write(p []byte) (int, error) {
 	var writed uint32
 	err := syscall.WriteFile(port.handle, p, &writed, nil)
 	return int(writed), err
+}
+
+func (port *SerialPort) SendBreak(breakTime int) error {
+	// Set the Break
+	if SetCommBreak(port.handle) != nil {
+		port.Close()
+		return &SerialPortError{code: ERROR_INVALID_SERIAL_PORT}
+	}
+
+	// Sleep for a period
+	time.Sleep(time.Duration(breakTime) * time.Millisecond)
+
+	// Reset the BREAK
+	if ClearCommBreak(port.handle) != nil {
+		port.Close()
+		return &SerialPortError{code: ERROR_INVALID_SERIAL_PORT}
+	}
+	return nil
 }
 
 const (
@@ -171,6 +192,8 @@ const (
 	TWOSTOPBITS  = 2
 )
 
+/// Set the Baud rate, data bits, stop bit and Parity
+/// Default is 9600 8N1
 func (port *SerialPort) SetMode(mode *Mode) error {
 	params := DCB{}
 	if GetCommState(port.handle, &params) != nil {
