@@ -92,7 +92,6 @@ func (port *SerialPort) Write(p []byte) (int, error) {
 	return int(writed), err
 }
 
-/// Set a BREAK
 func (port *SerialPort) SendBreak(breakTime int) error {
 	// Set the Break
 	if SetCommBreak(port.handle) != nil {
