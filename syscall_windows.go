@@ -14,6 +14,8 @@ var (
 	procGetCommState    = modkernel32.NewProc("GetCommState")
 	procSetCommState    = modkernel32.NewProc("SetCommState")
 	procSetCommTimeouts = modkernel32.NewProc("SetCommTimeouts")
+	procSetCommBreak    = modkernel32.NewProc("SetCommBreak")
+	procClearCommBreak  = modkernel32.NewProc("ClearCommBreak")
 )
 
 func RegEnumValue(key syscall.Handle, index uint32, name *uint16, nameLen *uint32, reserved *uint32, class *uint16, value *uint16, valueLen *uint32) (regerrno error) {
@@ -50,6 +52,30 @@ func SetCommState(handle syscall.Handle, dcb *DCB) (err error) {
 
 func SetCommTimeouts(handle syscall.Handle, timeouts *COMMTIMEOUTS) (err error) {
 	r1, _, e1 := syscall.Syscall(procSetCommTimeouts.Addr(), 2, uintptr(handle), uintptr(unsafe.Pointer(timeouts)), 0)
+	if r1 == 0 {
+		if e1 != 0 {
+			err = error(e1)
+		} else {
+			err = syscall.EINVAL
+		}
+	}
+	return
+}
+
+func SetCommBreak(handle syscall.Handle) (err error) {
+	r1, _, e1 := syscall.Syscall(procSetCommBreak.Addr(), 1, uintptr(handle), 0, 0)
+	if r1 == 0 {
+		if e1 != 0 {
+			err = error(e1)
+		} else {
+			err = syscall.EINVAL
+		}
+	}
+	return
+}
+
+func ClearCommBreak(handle syscall.Handle) (err error) {
+	r1, _, e1 := syscall.Syscall(procClearCommBreak.Addr(), 1, uintptr(handle), 0, 0)
 	if r1 == 0 {
 		if e1 != 0 {
 			err = error(e1)
