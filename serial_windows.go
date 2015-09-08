@@ -268,4 +268,8 @@ func OpenPort(portName string, mode *Mode) (*SerialPort, error) {
 	return port, nil
 }
 
+func (port *SerialPort) SetDTR(_ bool) error {
+	return nil
+}
+
 // vi:ts=2

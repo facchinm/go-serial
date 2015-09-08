@@ -40,19 +40,6 @@ func (port *SerialPort) Write(p []byte) (n int, err error) {
 	return syscall.Write(port.handle, p)
 }
 
-/*
-func (port *SerialPort) SetDTR(level bool) error {
-	var cmd uintptr
-	if level {
-		cmd = syscall.TIOCMBIS
-	} else {
-		cmd = syscall.TIOCMBIC
-	}
-
-	return ioctl(port.handle, ioctl_tiocmdtr, cmd)
-}
-*/
-
 // Set all parameters of the serial port. See the Mode structure for more
 // info.
 func (port *SerialPort) SetMode(mode *Mode) error {
@@ -264,4 +251,18 @@ func (port *SerialPort) acquireExclusiveAccess() error {
 
 func (port *SerialPort) releaseExclusiveAccess() error {
 	return ioctl(port.handle, syscall.TIOCNXCL, 0)
+}
+
+func (port *SerialPort) SetDTR(level bool) error {
+	var status uint
+	_, _, err := syscall.Syscall(syscall.SYS_IOCTL, uintptr(port.handle), uintptr(syscall.TIOCMGET), uintptr(unsafe.Pointer(&status)))
+	if err == 0 {
+		if level == false {
+			status &= ^uint(syscall.TIOCM_DTR)
+		} else {
+			status |= syscall.TIOCM_DTR
+		}
+		_, _, err = syscall.Syscall(syscall.SYS_IOCTL, uintptr(port.handle), uintptr(syscall.TIOCMSET), uintptr(unsafe.Pointer(&status)))
+	}
+	return err
 }
