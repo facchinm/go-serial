@@ -1,29 +1,45 @@
-//
-// Copyright 2014 Cristian Maglie. All rights reserved.
-// Use of this source code is governed by a BSD-style
-// license that can be found in the LICENSE file.
-//
+// +build windows
 
 package serial
 
-/*
+import (
+	"fmt"
+	"os"
+	"sync"
+	"syscall"
+	"time"
+	"unsafe"
+)
 
-// MSDN article on Serial Communications:
-// http://msdn.microsoft.com/en-us/library/ff802693.aspx
-
-// Arduino Playground article on serial communication with Windows API:
-// http://playground.arduino.cc/Interfacing/CPPWindows
-
-*/
-
-import "syscall"
-
-// opaque type that implements SerialPort interface for Windows
 type SerialPort struct {
-	handle syscall.Handle
+	p *Port
 }
 
-//sys RegEnumValue(key syscall.Handle, index uint32, name *uint16, nameLen *uint32, reserved *uint32, class *uint16, value *uint16, valueLen *uint32) (regerrno error) = advapi32.RegEnumValueW
+type Port struct {
+	f  *os.File
+	fd syscall.Handle
+	rl sync.Mutex
+	wl sync.Mutex
+	ro *syscall.Overlapped
+	wo *syscall.Overlapped
+}
+
+type structDCB struct {
+	DCBlength, BaudRate                            uint32
+	flags                                          [4]byte
+	wReserved, XonLim, XoffLim                     uint16
+	ByteSize, Parity, StopBits                     byte
+	XonChar, XoffChar, ErrorChar, EofChar, EvtChar byte
+	wReserved1                                     uint16
+}
+
+type structTimeouts struct {
+	ReadIntervalTimeout         uint32
+	ReadTotalTimeoutMultiplier  uint32
+	ReadTotalTimeoutConstant    uint32
+	WriteTotalTimeoutMultiplier uint32
+	WriteTotalTimeoutConstant   uint32
+}
 
 func GetPortsList() ([]string, error) {
 	subKey, err := syscall.UTF16PtrFromString("HARDWARE\\DEVICEMAP\\SERIALCOMM\\")
@@ -56,220 +72,289 @@ func GetPortsList() ([]string, error) {
 	return list, nil
 }
 
-func (port *SerialPort) Close() error {
-	return syscall.CloseHandle(port.handle)
-}
-
-func (port *SerialPort) Read(p []byte) (int, error) {
-	var readed uint32
-	params := &DCB{}
-	for {
-		if err := syscall.ReadFile(port.handle, p, &readed, nil); err != nil {
-			return int(readed), err
-		}
-		if readed > 0 {
-			return int(readed), nil
-		}
-
-		// At the moment it seems that the only reliable way to check if
-		// a serial port is alive in Windows is to check if the SetCommState
-		// function fails.
-
-		GetCommState(port.handle, params)
-		if err := SetCommState(port.handle, params); err != nil {
-			port.Close()
-			return 0, err
-		}
+func OpenPort(portName string, mode *Mode) (*SerialPort, error) {
+	p, err := openPort(portName, mode.BaudRate, time.Duration(mode.Vtimeout)*time.Millisecond)
+	if err == nil {
+		port := new(SerialPort)
+		port.p = p
+		return port, err
 	}
+	return nil, err
 }
 
-func (port *SerialPort) Write(p []byte) (int, error) {
-	var writed uint32
-	err := syscall.WriteFile(port.handle, p, &writed, nil)
-	return int(writed), err
+func openPort(name string, baud int, readTimeout time.Duration) (p *Port, err error) {
+	if len(name) > 0 && name[0] != '\\' {
+		name = "\\\\.\\" + name
+	}
+
+	h, err := syscall.CreateFile(syscall.StringToUTF16Ptr(name),
+		syscall.GENERIC_READ|syscall.GENERIC_WRITE,
+		0,
+		nil,
+		syscall.OPEN_EXISTING,
+		syscall.FILE_ATTRIBUTE_NORMAL|syscall.FILE_FLAG_OVERLAPPED,
+		0)
+	if err != nil {
+		return nil, err
+	}
+	f := os.NewFile(uintptr(h), name)
+	defer func() {
+		if err != nil {
+			f.Close()
+		}
+	}()
+
+	if err = setCommState(h, baud); err != nil {
+		return
+	}
+	if err = setupComm(h, 64, 64); err != nil {
+		return
+	}
+	if err = setCommTimeouts(h, readTimeout); err != nil {
+		return
+	}
+	if err = setCommMask(h); err != nil {
+		return
+	}
+
+	ro, err := newOverlapped()
+	if err != nil {
+		return
+	}
+	wo, err := newOverlapped()
+	if err != nil {
+		return
+	}
+	port := new(Port)
+	port.f = f
+	port.fd = h
+	port.ro = ro
+	port.wo = wo
+
+	return port, nil
 }
 
-const (
-	DCB_BINARY                   = 0x00000001
-	DCB_PARITY                   = 0x00000002
-	DCB_OUT_X_CTS_FLOW           = 0x00000004
-	DCB_OUT_X_DSR_FLOW           = 0x00000008
-	DCB_DTR_CONTROL_DISABLE_MASK = ^0x00000030
-	DCB_DTR_CONTROL_ENABLE       = 0x00000010
-	DCB_DTR_CONTROL_HANDSHAKE    = 0x00000020
-	DCB_DSR_SENSITIVITY          = 0x00000040
-	DCB_TX_CONTINUE_ON_XOFF      = 0x00000080
-	DCB_OUT_X                    = 0x00000100
-	DCB_IN_X                     = 0x00000200
-	DCB_ERROR_CHAR               = 0x00000400
-	DCB_NULL                     = 0x00000800
-	DCB_RTS_CONTROL_DISABLE_MASK = ^0x00003000
-	DCB_RTS_CONTROL_ENABLE       = 0x00001000
-	DCB_RTS_CONTROL_HANDSHAKE    = 0x00002000
-	DCB_RTS_CONTROL_TOGGLE       = 0x00003000
-	DCB_ABORT_ON_ERROR           = 0x00004000
+func (p *SerialPort) Close() error {
+	return p.p.f.Close()
+}
+
+func (p *SerialPort) Write(buf []byte) (int, error) {
+	p.p.wl.Lock()
+	defer p.p.wl.Unlock()
+
+	if err := resetEvent(p.p.wo.HEvent); err != nil {
+		return 0, err
+	}
+	var n uint32
+	err := syscall.WriteFile(p.p.fd, buf, &n, p.p.wo)
+	if err != nil && err != syscall.ERROR_IO_PENDING {
+		return int(n), err
+	}
+	return getOverlappedResult(p.p.fd, p.p.wo)
+}
+
+func (p *SerialPort) Read(buf []byte) (int, error) {
+	if p.p == nil || p.p.f == nil {
+		return 0, fmt.Errorf("Invalid port on read %v %v", p.p, p.p.f)
+	}
+
+	p.p.rl.Lock()
+	defer p.p.rl.Unlock()
+
+	if err := resetEvent(p.p.ro.HEvent); err != nil {
+		return 0, err
+	}
+	var done uint32
+	err := syscall.ReadFile(p.p.fd, buf, &done, p.p.ro)
+	if err != nil && err != syscall.ERROR_IO_PENDING {
+		return int(done), err
+	}
+	return getOverlappedResult(p.p.fd, p.p.ro)
+}
+
+// Discards data written to the port but not transmitted,
+// or data received but not read
+func (p *SerialPort) Flush() error {
+	return purgeComm(p.p.fd)
+}
+
+var (
+	nSetCommState,
+	nSetCommTimeouts,
+	nSetCommMask,
+	nSetupComm,
+	nGetOverlappedResult,
+	nCreateEvent,
+	nResetEvent,
+	nPurgeComm,
+	nFlushFileBuffers uintptr
+	modadvapi32       = syscall.NewLazyDLL("advapi32.dll")
+	procRegEnumValueW = modadvapi32.NewProc("RegEnumValueW")
 )
 
-type DCB struct {
-	DCBlength uint32
-	BaudRate  uint32
-
-	// Flags field is a bitfield
-	//  fBinary            :1
-	//  fParity            :1
-	//  fOutxCtsFlow       :1
-	//  fOutxDsrFlow       :1
-	//  fDtrControl        :2
-	//  fDsrSensitivity    :1
-	//  fTXContinueOnXoff  :1
-	//  fOutX              :1
-	//  fInX               :1
-	//  fErrorChar         :1
-	//  fNull              :1
-	//  fRtsControl        :2
-	//  fAbortOnError      :1
-	//  fDummy2            :17
-	Flags uint32
-
-	wReserved  uint16
-	XonLim     uint16
-	XoffLim    uint16
-	ByteSize   byte
-	Parity     byte
-	StopBits   byte
-	XonChar    byte
-	XoffChar   byte
-	ErrorChar  byte
-	EofChar    byte
-	EvtChar    byte
-	wReserved1 uint16
+func RegEnumValue(key syscall.Handle, index uint32, name *uint16, nameLen *uint32, reserved *uint32, class *uint16, value *uint16, valueLen *uint32) (regerrno error) {
+	r0, _, _ := syscall.Syscall9(procRegEnumValueW.Addr(), 8, uintptr(key), uintptr(index), uintptr(unsafe.Pointer(name)), uintptr(unsafe.Pointer(nameLen)), uintptr(unsafe.Pointer(reserved)), uintptr(unsafe.Pointer(class)), uintptr(unsafe.Pointer(value)), uintptr(unsafe.Pointer(valueLen)), 0)
+	if r0 != 0 {
+		regerrno = syscall.Errno(r0)
+	}
+	return
 }
 
-type COMMTIMEOUTS struct {
-	ReadIntervalTimeout         uint32
-	ReadTotalTimeoutMultiplier  uint32
-	ReadTotalTimeoutConstant    uint32
-	WriteTotalTimeoutMultiplier uint32
-	WriteTotalTimeoutConstant   uint32
+func init() {
+	k32, err := syscall.LoadLibrary("kernel32.dll")
+	if err != nil {
+		panic("LoadLibrary " + err.Error())
+	}
+	defer syscall.FreeLibrary(k32)
+
+	nSetCommState = getProcAddr(k32, "SetCommState")
+	nSetCommTimeouts = getProcAddr(k32, "SetCommTimeouts")
+	nSetCommMask = getProcAddr(k32, "SetCommMask")
+	nSetupComm = getProcAddr(k32, "SetupComm")
+	nGetOverlappedResult = getProcAddr(k32, "GetOverlappedResult")
+	nCreateEvent = getProcAddr(k32, "CreateEventW")
+	nResetEvent = getProcAddr(k32, "ResetEvent")
+	nPurgeComm = getProcAddr(k32, "PurgeComm")
+	nFlushFileBuffers = getProcAddr(k32, "FlushFileBuffers")
 }
 
-//sys GetCommState(handle syscall.Handle, dcb *DCB) (err error)
-//sys SetCommState(handle syscall.Handle, dcb *DCB) (err error)
-//sys SetCommTimeouts(handle syscall.Handle, timeouts *COMMTIMEOUTS) (err error)
-
-const (
-	NOPARITY    = 0 // Default
-	ODDPARITY   = 1
-	EVENPARITY  = 2
-	MARKPARITY  = 3
-	SPACEPARITY = 4
-)
-
-const (
-	ONESTOPBIT   = 0 // Default
-	ONE5STOPBITS = 1
-	TWOSTOPBITS  = 2
-)
-
-func (port *SerialPort) SetMode(mode *Mode) error {
-	params := DCB{}
-	if GetCommState(port.handle, &params) != nil {
-		port.Close()
-		return &SerialPortError{code: ERROR_INVALID_SERIAL_PORT}
+func getProcAddr(lib syscall.Handle, name string) uintptr {
+	addr, err := syscall.GetProcAddress(lib, name)
+	if err != nil {
+		panic(name + " " + err.Error())
 	}
-	if mode.BaudRate == 0 {
-		params.BaudRate = 9600 // Default to 9600
-	} else {
-		params.BaudRate = uint32(mode.BaudRate)
-	}
-	if mode.DataBits == 0 {
-		params.ByteSize = 8 // Default to 8 bits
-	} else {
-		params.ByteSize = byte(mode.DataBits)
-	}
-	params.StopBits = byte(mode.StopBits)
-	params.Parity = byte(mode.Parity)
-	if SetCommState(port.handle, &params) != nil {
-		port.Close()
-		return &SerialPortError{code: ERROR_INVALID_SERIAL_PORT}
+	return addr
+}
+
+func setCommState(h syscall.Handle, baud int) error {
+	var params structDCB
+	params.DCBlength = uint32(unsafe.Sizeof(params))
+
+	params.flags[0] = 0x01  // fBinary
+	params.flags[0] |= 0x10 // Assert DSR
+
+	params.BaudRate = uint32(baud)
+	params.ByteSize = 8
+
+	r, _, err := syscall.Syscall(nSetCommState, 2, uintptr(h), uintptr(unsafe.Pointer(&params)), 0)
+	if r == 0 {
+		return err
 	}
 	return nil
 }
 
-func OpenPort(portName string, mode *Mode) (*SerialPort, error) {
-	portName = "\\\\.\\" + portName
-	path, err := syscall.UTF16PtrFromString(portName)
-	if err != nil {
-		return nil, err
-	}
-	handle, err := syscall.CreateFile(
-		path,
-		syscall.GENERIC_READ|syscall.GENERIC_WRITE,
-		0, nil,
-		syscall.OPEN_EXISTING,
-		0, //syscall.FILE_FLAG_OVERLAPPED,
-		0)
-	if err != nil {
-		switch err {
-		case syscall.ERROR_ACCESS_DENIED:
-			return nil, &SerialPortError{code: ERROR_PORT_BUSY}
-		case syscall.ERROR_FILE_NOT_FOUND:
-			return nil, &SerialPortError{code: ERROR_PORT_NOT_FOUND}
+func setCommTimeouts(h syscall.Handle, readTimeout time.Duration) error {
+	var timeouts structTimeouts
+	const MAXDWORD = 1<<32 - 1
+
+	if readTimeout > 0 {
+		// non-blocking read
+		timeoutMs := readTimeout.Nanoseconds() / 1e6
+		if timeoutMs < 1 {
+			timeoutMs = 1
+		} else if timeoutMs > MAXDWORD {
+			timeoutMs = MAXDWORD
 		}
+		timeouts.ReadIntervalTimeout = 0
+		timeouts.ReadTotalTimeoutMultiplier = 0
+		timeouts.ReadTotalTimeoutConstant = uint32(timeoutMs)
+	} else {
+		// blocking read
+		timeouts.ReadIntervalTimeout = MAXDWORD
+		timeouts.ReadTotalTimeoutMultiplier = MAXDWORD
+		timeouts.ReadTotalTimeoutConstant = MAXDWORD - 1
+	}
+
+	/* From http://msdn.microsoft.com/en-us/library/aa363190(v=VS.85).aspx
+
+		 For blocking I/O see below:
+
+		 Remarks:
+
+		 If an application sets ReadIntervalTimeout and
+		 ReadTotalTimeoutMultiplier to MAXDWORD and sets
+		 ReadTotalTimeoutConstant to a value greater than zero and
+		 less than MAXDWORD, one of the following occurs when the
+		 ReadFile function is called:
+
+		 If there are any bytes in the input buffer, ReadFile returns
+		       immediately with the bytes in the buffer.
+
+		 If there are no bytes in the input buffer, ReadFile waits
+	               until a byte arrives and then returns immediately.
+
+		 If no bytes arrive within the time specified by
+		       ReadTotalTimeoutConstant, ReadFile times out.
+	*/
+
+	r, _, err := syscall.Syscall(nSetCommTimeouts, 2, uintptr(h), uintptr(unsafe.Pointer(&timeouts)), 0)
+	if r == 0 {
+		return err
+	}
+	return nil
+}
+
+func setupComm(h syscall.Handle, in, out int) error {
+	r, _, err := syscall.Syscall(nSetupComm, 3, uintptr(h), uintptr(in), uintptr(out))
+	if r == 0 {
+		return err
+	}
+	return nil
+}
+
+func setCommMask(h syscall.Handle) error {
+	const EV_RXCHAR = 0x0001
+	r, _, err := syscall.Syscall(nSetCommMask, 2, uintptr(h), EV_RXCHAR, 0)
+	if r == 0 {
+		return err
+	}
+	return nil
+}
+
+func resetEvent(h syscall.Handle) error {
+	r, _, err := syscall.Syscall(nResetEvent, 1, uintptr(h), 0, 0)
+	if r == 0 {
+		return err
+	}
+	return nil
+}
+
+func purgeComm(h syscall.Handle) error {
+	const PURGE_TXABORT = 0x0001
+	const PURGE_RXABORT = 0x0002
+	const PURGE_TXCLEAR = 0x0004
+	const PURGE_RXCLEAR = 0x0008
+	r, _, err := syscall.Syscall(nPurgeComm, 2, uintptr(h),
+		PURGE_TXABORT|PURGE_RXABORT|PURGE_TXCLEAR|PURGE_RXCLEAR, 0)
+	if r == 0 {
+		return err
+	}
+	return nil
+}
+
+func newOverlapped() (*syscall.Overlapped, error) {
+	var overlapped syscall.Overlapped
+	r, _, err := syscall.Syscall6(nCreateEvent, 4, 0, 1, 0, 0, 0, 0)
+	if r == 0 {
 		return nil, err
 	}
-	// Create the serial port
-	port := &SerialPort{
-		handle: handle,
+	overlapped.HEvent = syscall.Handle(r)
+	return &overlapped, nil
+}
+
+func getOverlappedResult(h syscall.Handle, overlapped *syscall.Overlapped) (int, error) {
+	var n int
+	r, _, err := syscall.Syscall6(nGetOverlappedResult, 4,
+		uintptr(h),
+		uintptr(unsafe.Pointer(overlapped)),
+		uintptr(unsafe.Pointer(&n)), 1, 0, 0)
+	if r == 0 {
+		return n, err
 	}
 
-	// Set port parameters
-	if port.SetMode(mode) != nil {
-		port.Close()
-		return nil, &SerialPortError{code: ERROR_INVALID_SERIAL_PORT}
-	}
-
-	params := &DCB{}
-	if GetCommState(port.handle, params) != nil {
-		port.Close()
-		return nil, &SerialPortError{code: ERROR_INVALID_SERIAL_PORT}
-	}
-	params.Flags |= DCB_RTS_CONTROL_ENABLE | DCB_DTR_CONTROL_ENABLE
-	params.Flags &= ^uint32(DCB_OUT_X_CTS_FLOW)
-	params.Flags &= ^uint32(DCB_OUT_X_DSR_FLOW)
-	params.Flags &= ^uint32(DCB_DSR_SENSITIVITY)
-	params.Flags |= DCB_TX_CONTINUE_ON_XOFF
-	params.Flags &= ^uint32(DCB_IN_X | DCB_OUT_X)
-	params.Flags &= ^uint32(DCB_ERROR_CHAR)
-	params.Flags &= ^uint32(DCB_NULL)
-	params.Flags &= ^uint32(DCB_ABORT_ON_ERROR)
-	params.XonLim = 2048
-	params.XoffLim = 512
-	params.XonChar = 17  // DC1
-	params.XoffChar = 19 // C3
-	if SetCommState(port.handle, params) != nil {
-		port.Close()
-		return nil, &SerialPortError{code: ERROR_INVALID_SERIAL_PORT}
-	}
-
-	// Set timeouts to 1 second
-	timeouts := &COMMTIMEOUTS{
-		ReadIntervalTimeout:         0xFFFFFFFF,
-		ReadTotalTimeoutMultiplier:  0xFFFFFFFF,
-		ReadTotalTimeoutConstant:    1000, // 1 sec
-		WriteTotalTimeoutConstant:   0,
-		WriteTotalTimeoutMultiplier: 0,
-	}
-	if SetCommTimeouts(port.handle, timeouts) != nil {
-		port.Close()
-		return nil, &SerialPortError{code: ERROR_INVALID_SERIAL_PORT}
-	}
-
-	return port, nil
+	return n, nil
 }
 
 func (port *SerialPort) SetDTR(_ bool) error {
 	return nil
 }
-
-// vi:ts=2
