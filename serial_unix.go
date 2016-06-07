@@ -265,3 +265,7 @@ func (port *SerialPort) acquireExclusiveAccess() error {
 func (port *SerialPort) releaseExclusiveAccess() error {
 	return ioctl(port.handle, syscall.TIOCNXCL, 0)
 }
+
+func (port *SerialPort) SendBreak(breakTime int) error {
+	return ioctl(port.handle, syscall.TIOCSBRK, 0)
+}
