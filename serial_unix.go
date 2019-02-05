@@ -369,8 +369,8 @@ func setRawMode(settings *unix.Termios, mode *Mode) {
 		mode.Vmin = 1
 	}
 
-	settings.Cc[syscall.VMIN] = mode.Vmin
-	settings.Cc[syscall.VTIME] = mode.Vtimeout
+	settings.Cc[unix.VMIN] = mode.Vmin
+	settings.Cc[unix.VTIME] = mode.Vtimeout
 }
 
 // native syscall wrapper functions
