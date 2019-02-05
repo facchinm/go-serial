@@ -13,6 +13,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"time"
 	"unsafe"
 
 	"golang.org/x/sys/unix"
@@ -60,7 +61,7 @@ func (port *unixPort) Read(p []byte) (n int, err error) {
 	}
 
 	fds := unixutils.NewFDSet(port.handle, port.closeSignal.ReadFD())
-	res, err := unixutils.Select(fds, nil, fds, -1)
+	res, err := unixutils.Select(fds, nil, fds, 1000 * time.Millisecond)
 	if err != nil {
 		return 0, err
 	}
