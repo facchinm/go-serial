@@ -427,6 +427,13 @@ func nativeOpen(portName string, mode *Mode) (*windowsPort, error) {
 		WriteTotalTimeoutConstant:   0,
 		WriteTotalTimeoutMultiplier: 0,
 	}
+
+	if (mode.Vtimeout > 0) {
+		imeouts.ReadIntervalTimeout = 0
+		timeouts.ReadTotalTimeoutMultiplier = 0
+		timeouts.ReadTotalTimeoutConstant = uint32(timeout)
+	}
+
 	if setCommTimeouts(port.handle, timeouts) != nil {
 		port.Close()
 		return nil, &PortError{code: InvalidSerialPort}

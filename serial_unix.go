@@ -170,7 +170,7 @@ func nativeOpen(portName string, mode *Mode) (*unixPort, error) {
 	}
 
 	// Set raw mode
-	setRawMode(settings)
+	setRawMode(settings, mode)
 
 	// Explicitly disable RTS/CTS flow control
 	setTermSettingsCtsRts(false, settings)
@@ -330,7 +330,7 @@ func setTermSettingsCtsRts(enable bool, settings *unix.Termios) {
 	}
 }
 
-func setRawMode(settings *unix.Termios) {
+func setRawMode(settings *unix.Termios, mode *Mode) {
 	// Set local mode
 	settings.Cflag |= unix.CREAD
 	settings.Cflag |= unix.CLOCAL
@@ -363,9 +363,14 @@ func setRawMode(settings *unix.Termios) {
 
 	settings.Oflag &^= unix.OPOST
 
-	// Block reads until at least one char is available (no timeout)
-	settings.Cc[unix.VMIN] = 1
-	settings.Cc[unix.VTIME] = 0
+	if mode.Vmin == 0 && mode.Vtimeout == 0 {
+		// Switch to default mode
+		// Block reads until at least one char is available (no timeout)
+		mode.Vmin = 1
+	}
+
+	settings.Cc[syscall.VMIN] = mode.Vmin
+	settings.Cc[syscall.VTIME] = mode.Vtimeout
 }
 
 // native syscall wrapper functions
