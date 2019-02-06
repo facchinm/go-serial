@@ -429,9 +429,10 @@ func nativeOpen(portName string, mode *Mode) (*windowsPort, error) {
 	}
 
 	if (mode.Vtimeout > 0) {
-		imeouts.ReadIntervalTimeout = 0
+		timeouts.ReadIntervalTimeout = 0
 		timeouts.ReadTotalTimeoutMultiplier = 0
-		timeouts.ReadTotalTimeoutConstant = uint32(timeout)
+		// tenth of seconds to milliseconds
+		timeouts.ReadTotalTimeoutConstant = uint32(mode.Vtimeout * 100)
 	}
 
 	if setCommTimeouts(port.handle, timeouts) != nil {
